@@ -23,3 +23,5 @@ backend
 frontend
 .specstory
 .vscode
+
+.DS_Store
