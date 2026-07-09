@@ -1,7 +1,5 @@
 # AGENTS.md — TexHub Project Root
 
-> 参照 HarnessFlow `hf-context-mesh` root 模板生成；供 OpenCode / Cursor / Codex 等 AI Agent 读取。
-
 ## Project Purpose
 
 TexHub 是一个在线 LaTeX 协作编辑平台（类 Overleaf），支持多人实时编辑、项目编译、PDF 预览与源码双向定位（SyncTeX）。本仓库 `texhub-ai` 是 TexHub 的 AI 辅助开发工作区，镜像 `dolphin/texhub` 的前后端代码结构。
