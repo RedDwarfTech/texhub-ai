@@ -14,7 +14,7 @@ texhub-ai/
 │   └── rd-component/    # 共享 React 组件库
 └── backend/
     ├── texhub-server/   # 主 API：用户、项目、文件、模板、队列
-    ├── tex-render/      # LaTeX 编译服务（cv-render）：编译任务消费与 SyncTeX
+    ├── tex-render/      # LaTeX 编译服务（cv-render）：编译任务消费与 SyncTeX，项目为无状态项目
     ├── rust_wheel/      # 共享 Rust 基础库（配置、模型、中间件）
     └── infra-server/    # RedDwarf 基础设施服务（用户/鉴权等）
 ```
