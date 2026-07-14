@@ -1,0 +1,103 @@
+# PGO PostgresCluster 备份配置片段
+# 将 spec.backups 段合并到现有 reddwarf-postgresql PostgresCluster CR
+#
+# 应用前：
+#   1. 创建 S3 凭证 Secret（见 backup-repo-s3-secret.yaml）
+#   2. 确认 MinIO/S3 endpoint 与 bucket 已就绪
+#   3. kubectl apply -f postgrescluster-backup.yaml
+#
+# 文档：docs/ops/backup/postgresql-pgbackrest-backup-plan.md §3.1
+
+apiVersion: postgres-operator.crunchydata.com/v1beta1
+kind: PostgresCluster
+metadata:
+  name: reddwarf-postgresql
+  namespace: reddwarf-storage
+spec:
+  # ... 保留现有 spec（instances、users 等）...
+
+  backups:
+    pgbackrest:
+      # 全局 pgBackRest 参数
+      global:
+        archive-async: "y"
+        archive-push-queue-max: "1GiB"
+        start-fast: "y"
+        delta: "y"
+        process-max: "4"
+        compress-type: "zst"
+        repo1-retention-full: "4"
+        repo1-retention-diff: "7"
+        repo1-retention-archive-type: "full"
+        repo1-retention-archive: "7"
+        # 启用备份加密时取消注释：
+        # repo1-cipher-type: "aes-256-cbc"
+        # repo1-cipher-pass: 引用 pgbackrest-cipher-secret
+
+      metadata:
+        labels:
+          app: pgbackrest-backup
+          component: postgres-backup
+
+      repos:
+        - name: repo1
+          # --- 生产：S3 / MinIO ---
+          s3:
+            bucket: texhub-pg-backup
+            endpoint: minio.reddwarf-storage.svc.cluster.local:9000
+            region: us-east-1
+          # PGO 从以下 Secret 读取 S3 凭证（key 命名约定）：
+          #   repo1-s3-key, repo1-s3-key-secret
+          # 在 repos 同级通过 customization 或 env 注入，具体见 PGO 版本文档
+
+          # --- 开发：本地 PVC（与 S3 二选一）---
+          # volume:
+          #   volumeClaimSpec:
+          #     accessModes:
+          #       - ReadWriteOnce
+          #     storageClassName: local-path
+          #     resources:
+          #       requests:
+          #         storage: 100Gi
+
+          # Operator 自动创建对应 CronJob
+          schedules:
+            full: "0 2 * * 0"           # 每周日 02:00 UTC
+            differential: "0 3 * * 1-6" # 周一至周六 03:00 UTC
+            incremental: "0 */6 * * *"  # 每 6 小时
+
+          # 可选：手动备份默认参数
+          # manual:
+          #   repoName: repo1
+          #   options:
+          #     - --type=full
+
+      # repo 专用 PVC 大小（仅 volume 模式）
+      # repoHost:
+      #   resources:
+      #     requests:
+      #       cpu: "500m"
+      #       memory: "512Mi"
+
+---
+# S3 凭证 Secret（PGO 命名约定示例，按实际 PGO 版本调整）
+apiVersion: v1
+kind: Secret
+metadata:
+  name: reddwarf-postgresql-pgbackrest-s3
+  namespace: reddwarf-storage
+type: Opaque
+stringData:
+  repo1-s3-key: "REPLACE_WITH_ACCESS_KEY"
+  repo1-s3-key-secret: "REPLACE_WITH_SECRET_KEY"
+
+---
+# 可选：备份加密密钥
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: pgbackrest-cipher-secret
+#   namespace: reddwarf-storage
+# type: Opaque
+# stringData:
+#   cipher-pass: "REPLACE_WITH_STRONG_PASSPHRASE"

@@ -1,0 +1,45 @@
+# pgBackRest 本地 PVC 备份仓库（开发 / 小规模环境）
+# 生产环境建议使用 S3/MinIO，见 postgrescluster-backup.yaml
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pgbackrest-repo-pvc
+  namespace: reddwarf-storage
+  labels:
+    app: pgbackrest-backup
+    component: backup-repo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path   # 按集群实际 StorageClass 修改
+  resources:
+    requests:
+      storage: 100Gi
+
+---
+# 可选：Repo Host Pod（独立 CronJob 方案挂载此 PVC）
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pgbackrest-repo-host
+  namespace: reddwarf-storage
+  labels:
+    app: pgbackrest-backup
+    component: backup-repo
+spec:
+  containers:
+    - name: pgbackrest
+      image: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.51-0
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: repo
+          mountPath: /pgbackrest/repo
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+  volumes:
+    - name: repo
+      persistentVolumeClaim:
+        claimName: pgbackrest-repo-pvc

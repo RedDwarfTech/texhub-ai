@@ -1,0 +1,235 @@
+# 独立 pgBackRest CronJob（非 PGO 或补充方案）
+# 前提：PostgreSQL Pod 已配置 archive_command 且 stanza 已 create/check
+#
+# 文档：docs/ops/backup/postgresql-pgbackrest-backup-plan.md §3.2
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgbackrest-config
+  namespace: reddwarf-storage
+  labels:
+    app: pgbackrest-backup
+data:
+  pgbackrest.conf: |
+    [global]
+    repo1-type=s3
+    repo1-path=/pgbackrest/repo
+    repo1-s3-endpoint=minio.reddwarf-storage.svc.cluster.local:9000
+    repo1-s3-bucket=texhub-pg-backup
+    repo1-s3-region=us-east-1
+    repo1-s3-uri-style=path
+    repo1-retention-full=4
+    repo1-retention-diff=7
+    repo1-retention-archive-type=full
+    repo1-retention-archive=7
+    log-level-console=info
+    start-fast=y
+    delta=y
+    process-max=4
+    compress-type=zst
+    archive-async=y
+
+    [pod]
+    pg1-path=/var/lib/postgresql/data
+    pg1-port=5432
+    pg1-user=postgres
+    pg1-host=reddwarf-postgresql.reddwarf-storage.svc.cluster.local
+    pg1-database=postgres
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pgbackrest-s3-creds
+  namespace: reddwarf-storage
+type: Opaque
+stringData:
+  PGBACKREST_REPO1_S3_KEY: "REPLACE_WITH_ACCESS_KEY"
+  PGBACKREST_REPO1_S3_KEY_SECRET: "REPLACE_WITH_SECRET_KEY"
+
+---
+# 全量备份 — 每周日 02:00
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pgbackrest-full-backup
+  namespace: reddwarf-storage
+  labels:
+    app: pgbackrest-backup
+    backup-type: full
+spec:
+  schedule: "0 2 * * 0"
+  timeZone: "Asia/Shanghai"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels:
+            app: pgbackrest-backup
+            backup-type: full
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pgbackrest
+              image: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.51-0
+              env:
+                - name: PGBACKREST_STANZA
+                  value: pod
+                - name: PGBACKREST_REPO1_S3_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: pgbackrest-s3-creds
+                      key: PGBACKREST_REPO1_S3_KEY
+                - name: PGBACKREST_REPO1_S3_KEY_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: pgbackrest-s3-creds
+                      key: PGBACKREST_REPO1_S3_KEY_SECRET
+              command:
+                - /bin/bash
+                - -ec
+                - |
+                  pgbackrest --stanza="${PGBACKREST_STANZA}" check
+                  pgbackrest --stanza="${PGBACKREST_STANZA}" backup --type=full
+                  pgbackrest --stanza="${PGBACKREST_STANZA}" info
+              volumeMounts:
+                - name: pgbackrest-config
+                  mountPath: /etc/pgbackrest
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "512Mi"
+                limits:
+                  cpu: "2"
+                  memory: "2Gi"
+          volumes:
+            - name: pgbackrest-config
+              configMap:
+                name: pgbackrest-config
+
+---
+# 差异备份 — 周一至周六 03:00
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pgbackrest-diff-backup
+  namespace: reddwarf-storage
+  labels:
+    app: pgbackrest-backup
+    backup-type: diff
+spec:
+  schedule: "0 3 * * 1-6"
+  timeZone: "Asia/Shanghai"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app: pgbackrest-backup
+            backup-type: diff
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pgbackrest
+              image: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.51-0
+              env:
+                - name: PGBACKREST_STANZA
+                  value: pod
+                - name: PGBACKREST_REPO1_S3_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: pgbackrest-s3-creds
+                      key: PGBACKREST_REPO1_S3_KEY
+                - name: PGBACKREST_REPO1_S3_KEY_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: pgbackrest-s3-creds
+                      key: PGBACKREST_REPO1_S3_KEY_SECRET
+              command:
+                - /bin/bash
+                - -ec
+                - |
+                  pgbackrest --stanza="${PGBACKREST_STANZA}" backup --type=diff
+                  pgbackrest --stanza="${PGBACKREST_STANZA}" info
+              volumeMounts:
+                - name: pgbackrest-config
+                  mountPath: /etc/pgbackrest
+                  readOnly: true
+          volumes:
+            - name: pgbackrest-config
+              configMap:
+                name: pgbackrest-config
+
+---
+# 增量备份 — 每 6 小时
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pgbackrest-incr-backup
+  namespace: reddwarf-storage
+  labels:
+    app: pgbackrest-backup
+    backup-type: incr
+spec:
+  schedule: "0 */6 * * *"
+  timeZone: "Asia/Shanghai"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: pgbackrest-backup
+            backup-type: incr
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pgbackrest
+              image: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.51-0
+              env:
+                - name: PGBACKREST_STANZA
+                  value: pod
+                - name: PGBACKREST_REPO1_S3_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: pgbackrest-s3-creds
+                      key: PGBACKREST_REPO1_S3_KEY
+                - name: PGBACKREST_REPO1_S3_KEY_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: pgbackrest-s3-creds
+                      key: PGBACKREST_REPO1_S3_KEY_SECRET
+              command:
+                - /bin/bash
+                - -ec
+                - |
+                  pgbackrest --stanza="${PGBACKREST_STANZA}" backup --type=incr
+                  pgbackrest --stanza="${PGBACKREST_STANZA}" info
+              volumeMounts:
+                - name: pgbackrest-config
+                  mountPath: /etc/pgbackrest
+                  readOnly: true
+          volumes:
+            - name: pgbackrest-config
+              configMap:
+                name: pgbackrest-config

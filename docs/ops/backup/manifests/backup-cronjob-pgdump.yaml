@@ -1,0 +1,146 @@
+# 轻量级 PostgreSQL 逻辑备份 CronJob
+# 无 Operator / 无 pgBackRest / 无常驻 Pod
+# 文档：docs/ops/backup/postgresql-lightweight-backup-plan.md
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backup-data
+  namespace: reddwarf-storage
+  labels:
+    app: postgres-pgdump-backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path   # 按集群实际 StorageClass 修改
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-backup-creds
+  namespace: reddwarf-storage
+  labels:
+    app: postgres-pgdump-backup
+type: Opaque
+stringData:
+  POSTGRES_HOST: "reddwarf-postgresql.reddwarf-storage.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: "postgres"
+  POSTGRES_PASSWORD: "REPLACE_WITH_PASSWORD"
+  POSTGRES_DB: "tex"
+  # 保留天数
+  BACKUP_RETENTION_DAYS: "7"
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-pgdump-backup
+  namespace: reddwarf-storage
+  labels:
+    app: postgres-pgdump-backup
+spec:
+  schedule: "0 3 * * *"
+  timeZone: "Asia/Shanghai"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: postgres-pgdump-backup
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pgdump
+              image: postgres:16-alpine
+              env:
+                - name: POSTGRES_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-backup-creds
+                      key: POSTGRES_HOST
+                - name: POSTGRES_PORT
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-backup-creds
+                      key: POSTGRES_PORT
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-backup-creds
+                      key: POSTGRES_USER
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-backup-creds
+                      key: POSTGRES_PASSWORD
+                - name: POSTGRES_DB
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-backup-creds
+                      key: POSTGRES_DB
+                - name: BACKUP_RETENTION_DAYS
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-backup-creds
+                      key: BACKUP_RETENTION_DAYS
+                - name: BACKUP_DIR
+                  value: "/backup"
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-backup-creds
+                      key: POSTGRES_PASSWORD
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  set -eu
+                  DATE=$(date +%Y%m%d_%H%M%S)
+                  BACKUP_FILE="${BACKUP_DIR}/${POSTGRES_DB}_${DATE}.dump"
+
+                  echo "[$(date -Iseconds)] backup start: db=${POSTGRES_DB} host=${POSTGRES_HOST}"
+
+                  pg_dump -h "${POSTGRES_HOST}" \
+                    -p "${POSTGRES_PORT}" \
+                    -U "${POSTGRES_USER}" \
+                    -d "${POSTGRES_DB}" \
+                    -Fc \
+                    --no-owner \
+                    --no-acl \
+                    -f "${BACKUP_FILE}"
+
+                  SIZE=$(du -h "${BACKUP_FILE}" | cut -f1)
+                  echo "[$(date -Iseconds)] backup done: ${BACKUP_FILE} (${SIZE})"
+
+                  # 过期清理
+                  find "${BACKUP_DIR}" -name "${POSTGRES_DB}_*.dump" -mtime +"${BACKUP_RETENTION_DAYS}" -delete
+                  echo "[$(date -Iseconds)] retention cleanup: keep ${BACKUP_RETENTION_DAYS} days"
+
+                  ls -lh "${BACKUP_DIR}/${POSTGRES_DB}"_*.dump 2>/dev/null | tail -5 || true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              volumeMounts:
+                - name: backup-data
+                  mountPath: /backup
+          volumes:
+            - name: backup-data
+              persistentVolumeClaim:
+                claimName: postgres-backup-data

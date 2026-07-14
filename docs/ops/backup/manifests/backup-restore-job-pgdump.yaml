@@ -1,0 +1,78 @@
+# pg_dump 恢复演练 Job（仅在隔离命名空间使用，勿对生产直接 --clean）
+# 文档：docs/ops/backup/postgresql-lightweight-backup-plan.md §6
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-pgdump-restore-drill
+  namespace: reddwarf-storage-restore-test   # 改为演练命名空间
+  labels:
+    app: postgres-pgdump-restore
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: postgres-pgdump-restore
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: pgrestore
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_HOST
+              value: "reddwarf-postgresql.reddwarf-storage.svc.cluster.local"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-backup-creds
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: "tex_restore_test"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-backup-creds
+                  key: POSTGRES_PASSWORD
+            # 指定要恢复的 dump 文件名（挂载 PVC 后选择）
+            - name: BACKUP_FILE
+              value: "/backup/tex_20260714_030001.dump"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              set -eu
+              echo "create database if not exists (via psql)"
+              psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d postgres \
+                -c "SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'" | grep -q 1 || \
+              psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d postgres \
+                -c "CREATE DATABASE ${POSTGRES_DB};"
+
+              echo "restore from ${BACKUP_FILE}"
+              pg_restore -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
+                -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
+                --no-owner --no-acl -j 2 "${BACKUP_FILE}"
+
+              echo "verify table count"
+              psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
+                -c "SELECT count(*) AS tables FROM information_schema.tables WHERE table_schema='public';"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: backup-data
+              mountPath: /backup
+              readOnly: true
+      volumes:
+        - name: backup-data
+          persistentVolumeClaim:
+            claimName: postgres-backup-data
