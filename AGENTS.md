@@ -166,5 +166,3 @@ pub fn config(cfg: &mut web::ServiceConfig) {
 | 后端 API | `cd backend/texhub-server && cargo build` |
 | 编译服务 | `cd backend/tex-render && cargo build` |
 | 共享 Rust 库 | `cd backend/rust_wheel && cargo build` |
-
-涉及 PDF 预览 / SyncTeX 高亮的改动，须在浏览器中手动验证：编辑器光标位置与 PDF 高亮区域是否对齐。
