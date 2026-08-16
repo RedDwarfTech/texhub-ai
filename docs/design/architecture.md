@@ -184,7 +184,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-  E1["编辑器实例 A<br/>CodeMirror + rdyjs"]
+  E1["编辑器实例 A<br/>CodeMirror + yjs"]
   E2["编辑器实例 B"]
   BC["texhub-broadcast<br/>Socket.IO path=/sync"]
   S["texhub-server<br/>文件持久化 / 初始化"]
@@ -194,7 +194,7 @@ flowchart TB
   S -->|"doc/initial"| BC
 ```
 
-- 文档模型：Yjs（`rdyjs`）；传输：Socket.IO（客户端包 `texhub-broadcast`）。
+- 文档模型：Yjs（官方实现 `yjs`）；传输：Socket.IO（客户端包 `texhub-broadcast`）。
 - 可同步扩展名由服务端配置（如 `tex,cls,bib,...`）。
 - 编译进度走 REST / SSE / 轮询，与 Yjs 主路径分离。
 
