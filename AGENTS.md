@@ -1,8 +1,8 @@
-# AGENTS.md — TexHub Project Root
+# AGENTS.md — TeXHub Project Root
 
 ## Project Purpose
 
-TexHub 是一个在线 LaTeX 协作编辑平台（类 Overleaf），支持多人实时编辑、项目编译、PDF 预览与源码双向定位（SyncTeX）。本仓库 `texhub-ai` 是 TexHub 的 AI 辅助开发工作区。
+TeXHub 是一个在线 LaTeX 协作编辑平台（类 Overleaf），支持多人实时编辑、项目编译、PDF 预览与源码双向定位（SyncTeX）。本仓库 `texhub-ai` 是 TeXHub 的 AI 辅助开发工作区。
 
 ## Top-level Architecture
 
@@ -64,7 +64,7 @@ cargo run
 
 ### 实时协作
 
-- 编辑态通过 Yjs + broadcast 同步；编译态通过 REST + 轮询/WebSocket 通知
+- 编辑态通过 Yjs + broadcast 同步；编译态通过 REST + 轮询/SSE通知
 
 ## Anti-Patterns
 
