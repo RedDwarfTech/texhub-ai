@@ -163,6 +163,8 @@ flowchart LR
 - **Worker 幂等消费**：消息体带 `updateHash + clock + docName`；Worker 消费时先 `checkAndMarkUpdateHash` 再 INSERT（沿用现有去重），`XACK` 在 INSERT 成功后执行。重复消费安全。
 - **批量合并**：单文档在同一消费周期内多条 update 可先 `Y.mergeUpdates` 再单条写，减少 PG 写入量（与现有 `PREFERRED_TRIM_SIZE` 逻辑兼容）。
 - **移除 fire-and-forget**：`handleYDocUpdate` 改为 `await XADD`（命令级确认），彻底消除"入队后进程崩溃"窗口。
+- **`putUpdateToQueue` 退出主链路**：其"进程内 PQueue + fire-and-forget"的排队职责整体由 WAL 顶替；真正写 `tex_sync` 的 `storeUpdate` / `pgPut`（`postgresql_operation.ts:217`）**保留并由 WAL Worker 复用**（幂等消费内部仍走 `checkAndMarkUpdateHash` → 锁内按 clock INSERT）。
+- **守卫迁移**：`putUpdateToQueue` 中两个守卫必须在新路径保留——① `docType === PROJECT` 跳过（项目根 doc 不落库）；② `getTexFileInfo` 富化 `docShowName`（XADD 时前置，或 Worker 内补）。串序不再依赖 PQueue 的 `concurrency:1`，改由 Stream 有序追加 + `storeUpdate` 既有跨实例分布式锁保证（锁本就在，去掉 PQueue 不引入新的并发风险）。
 - **保留 per-doc 不乱序**：Yjs update 本身有序应用才正确 → Worker 对同一 doc 用单消费者串行（Redis Stream 按 docName 分片，或 Worker 内按 docName 分桶 PQueue）。
 
 > 兼容性：WAL 只替换"从内存→PG"这一段，Yjs 广播与 Socket.IO 消息格式不变；Worker 失败时 Stream 保持 pending，可在恢复后重放，即天然补偿。
