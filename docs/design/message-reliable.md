@@ -217,6 +217,14 @@ flowchart LR
 - AE（Server）在 `connect` 握手时下发 `serverEpoch`（进程启动时间/版本号）。
 - 客户端本地缓存 `serverEpoch`；重连发现 epoch 变化即认为"服务端曾重启"，主动重建 provider 完整对账（发 step1 + 重放 Outbox），避免 `_synced` 残留误判。
 
+> **P1 实现说明（texhub-broadcast 1.0.138）**
+> - Redis Adapter：`@socket.io/redis-adapter`，复用现有 ioredis（`redis` 作 pub + `redis.duplicate()` 作 sub），channel 前缀 `texhub:sync:pubsub`；在 `initialize()` 首行、任何连接建立前挂载；无 Redis 时降级为单实例直连广播。
+> - Room 化广播：新增 `common/sync/room_broadcast.ts`（`joinDocRoom` / `broadcastToDocRoom`），root update/awareness 走 `doc:<projectId|docId>` 房间，subdoc update 走 `doc:<subdocGuid>` 并 `.except(originId)` 保持"不回显发起者"；连接建立时 join 根房间，首次接触子文档时 join 子房间。
+> - 注入而非静态引用：`room_broadcast` 处于客户端 provider 的打包图内，通过 `registerRoomServer(server)` 注入（`app.ts` 启动时调用），避免把服务端链（`init → sys_route → doc_controller → y-leveldb`）拖入前端 bundle。
+> - 僵尸连接：客户端启用 `_checkInterval`，超 30s 无消息先发 `probe` 探活，10s 内无 `probe_ack` 才 `ws.close()` 触发指数退避重连，避免误杀在线但闲置连接。
+> - 会话一致性：服务端握手 `emit("sync:epoch", { epoch })`，客户端缓存 `localStorage["texhub:server-epoch"]`，epoch 变化则重置 `_synced` 并走重放 Outbox + step1 完整对账。
+> - 连接恢复：开启 Socket.IO `connectionStateRecovery`（2min），短暂断线自动恢复房间与已 emit 参数。**发布单**：broadcast `8ba4205`/`e0ef8cd`（1.0.138），texhub-web `add168e5`。
+
 ---
 
 ## 7. P2 优化：文档生命周期与存储收尾
