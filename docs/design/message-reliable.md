@@ -20,6 +20,18 @@
 
 **本文 5~9 章给出 P0/P1/P2 的分层设计与里程碑排期。**
 
+### 当前代码落地状态
+
+当前工作区已完成以下可靠性改造：
+
+- 客户端 Outbox 使用 `texhub:outbox` IndexedDB v2（`updates` + `counters`），`enqueueNext` 在同一事务内分配 seq 并写入 update；浏览器缺少 IndexedDB 时不会静默降级为不可靠内存队列。
+- 根文档 update 发送后由客户端发送 `sync:ack_req`；子文档 seq 放在 `SyncMessageContext` 中。服务端仅在 Yjs update 应用成功且 WAL `XADD` 确认，或 PostgreSQL fallback 写入成功后发送 `sync:ack`；失败发送 `sync:nack`。
+- WAL 使用 Redis Stream `texhub:sync:updates:{docName}`、消费组 `g-sync-updates` 和 `texhub:sync:updates:registry`，Worker 仅在 `storeUpdate` 成功或幂等去重后 `XACK`。
+- 根/子文档广播已接入 Socket.IO room 和 Redis Adapter；连接关闭时等待 WAL 排空（`XPENDING == 0` 且消费组 lag/last-delivered-id 覆盖 stream 末条）及 compact 状态写入，失败也会继续释放文档资源。
+- 客户端断线重放、ACK 删除、刷新重试和服务端 epoch 变化均有状态通知；前端保留未确认编辑并提示用户。
+
+仍有边界：Redis registry 的 `SADD` 与 `XADD` 不是事务；旧 Outbox v1 若所有记录均已确认且没有 localStorage high-water，无法恢复历史 seq；同一浏览器多 Tab 会各自重放未确认 update 并竞争 ACK 归属，尚未做跨 Tab 选主；NACK 重试达到上限后条目保留在 Outbox 等待重连，不做后台无限重试；广播包发布前，前端仍需与 broadcast 版本统一。
+
 ---
 
 ## 2. 现状梳理
@@ -173,11 +185,11 @@ flowchart LR
 
 目标：断线/刷新/崩溃不丢本地编辑。
 
-- **本地队列**：浏览器 IndexedDB（`texhub:outbox:{projectId}`），按 docName + 单调 seq 追加 Yjs update 二进制。
+- **本地队列**：浏览器 IndexedDB（`texhub:outbox`，按 docName + 单调 seq 存储 Yjs update 二进制）；seq counter 与 update 在同一事务中提交。
 - **发送路径改造**：`provider.updateHandler` 产生 update 时：
-  1. 写入 Outbox（内存缓冲 + IndexedDB 持久化）；
-  2. `wsconnected` 时发送，并记录未确认 seq；
-  3. 收到服务端 ACK 后删除对应 seq。
+  1. 先原子写入 Outbox（内存快照 + IndexedDB 持久化）；
+  2. 持久化成功后再发送，并记录未确认 seq；
+  3. 收到服务端 ACK 后先删除 IndexedDB 条目，再更新内存状态。
 - **重连恢复**：`connect` 事件触发时——先重放 Outbox 中未确认 update（保证服务端是最新），再发 sync step1（对账收敛）。两者幂等，安全。
 - **ACK 通道**：为不破坏 Yjs 协议，ACK 走独立的 Socket.IO 事件（如 `socket.emit("sync:ack", { seq, doc })` / 服务端 `socket.on("sync:ack_req", cb)`），与 `message` 二进制通道解耦；服务端在 `readSyncMessage` 应用 update 成功后回 ACK。若不需要改协议，也可在 `MessageSync` 后追加一个 `SyncMessageType.MessageAck`（不推荐污染 Yjs 帧，优先独立事件）。
 
@@ -192,7 +204,7 @@ flowchart LR
 客户端仅在收到 `sync:ack`（或 `sync:persist`）后从 Outbox 删除。断线时 Outbox 保留，重连重放。
 
 > 选择 `ack`（内存应用即确认）还是 `persist`（WAL 落盘确认）取决于体验/安全的折中：
-> 默认建议 `ack`（低延迟）；`sync:persist` 作为"编译前 / 关闭页面前"的强一致收尾。
+> 当前实现采用 `persist` 语义：只有 WAL `XADD` 确认或 PostgreSQL fallback 成功后才回 `sync:ack`，避免客户端删除 Outbox 后服务端尚未持久化。`sync:flush` 仍作为编译前收尾。
 
 ---
 
@@ -217,13 +229,13 @@ flowchart LR
 - AE（Server）在 `connect` 握手时下发 `serverEpoch`（进程启动时间/版本号）。
 - 客户端本地缓存 `serverEpoch`；重连发现 epoch 变化即认为"服务端曾重启"，主动重建 provider 完整对账（发 step1 + 重放 Outbox），避免 `_synced` 残留误判。
 
-> **P1 实现说明（texhub-broadcast 1.0.138）**
+> **P1 实现说明（texhub-broadcast 1.0.140）**
 > - Redis Adapter：`@socket.io/redis-adapter`，复用现有 ioredis（`redis` 作 pub + `redis.duplicate()` 作 sub），channel 前缀 `texhub:sync:pubsub`；在 `initialize()` 首行、任何连接建立前挂载；无 Redis 时降级为单实例直连广播。
 > - Room 化广播：新增 `common/sync/room_broadcast.ts`（`joinDocRoom` / `broadcastToDocRoom`），root update/awareness 走 `doc:<projectId|docId>` 房间，subdoc update 走 `doc:<subdocGuid>` 并 `.except(originId)` 保持"不回显发起者"；连接建立时 join 根房间，首次接触子文档时 join 子房间。
 > - 注入而非静态引用：`room_broadcast` 处于客户端 provider 的打包图内，通过 `registerRoomServer(server)` 注入（`app.ts` 启动时调用），避免把服务端链（`init → sys_route → doc_controller → y-leveldb`）拖入前端 bundle。
 > - 僵尸连接：客户端启用 `_checkInterval`，超 30s 无消息先发 `probe` 探活，10s 内无 `probe_ack` 才 `ws.close()` 触发指数退避重连，避免误杀在线但闲置连接。
 > - 会话一致性：服务端握手 `emit("sync:epoch", { epoch })`，客户端缓存 `localStorage["texhub:server-epoch"]`，epoch 变化则重置 `_synced` 并走重放 Outbox + step1 完整对账。
-> - 连接恢复：开启 Socket.IO `connectionStateRecovery`（2min），短暂断线自动恢复房间与已 emit 参数。**发布单**：broadcast `8ba4205`/`e0ef8cd`（1.0.138），texhub-web `add168e5`。
+> - 连接恢复：开启 Socket.IO `connectionStateRecovery`（2min），短暂断线自动恢复房间与已 emit 参数。broadcast 与 texhub-web 依赖均已统一为 `1.0.140`。
 
 ---
 
@@ -232,11 +244,11 @@ flowchart LR
 ### 7.1 延迟销毁 + 优雅落库
 
 - `closeConn` 不再立即 `doc.destroy()`：
-  1. 将文档移入"空窗缓存"（LRU，TTL 默认 60s，可配）；
-  2. 等待该文档的 WAL 队列排空（`XTRIM` 后 `XINFO GROUPS pending=0`，或 Worker 返回 `waitDocUpdateStable` true）；
-  3. 空窗内再次连接则直接复用内存 doc（大幅降低冷启动重建）；
-  4. 空窗到期且无连接再 destroy + 写档收尾。
-- `Persistence.writeState` 落真正实现：至少保证 WAL 落盘完成；可选将内存 doc 状态快照写 `tex_sync` 一条 compact update（配合 GC 后可降低重建成本）。
+  1. **已实现**：先 `await writeState()` 收尾并释放 awareness/history/subdoc handler，再 `doc.destroy()`，无 PostgreSQL 配置时也走同一清理路径；
+  2. **已实现**：写档前等待该文档的 WAL 队列排空（`XPENDING == 0` 且消费组 `lag == 0`；Redis < 7 无 `lag` 时比较 `last-delivered-id` 与 stream 末条 id），避免未投递 entry 被裁剪；超时只告警，不阻塞释放；
+  3. **未实现**：将文档移入"空窗缓存"（LRU，TTL 默认 60s，可配），空窗内再次连接直接复用内存 doc；
+  4. **未实现**：空窗到期且无连接再 destroy + 写档收尾。
+- `Persistence.writeState` **已实现**：先 `waitDocWALDrained(docName, 30000)`，再用 `Y.encodeStateAsUpdate` + `Y.encodeStateVector` 经 `flushDocument` 写一条 compact update 到 `tex_sync`，降低全量重建成本。
 
 ### 7.2 全量重建优化
 
